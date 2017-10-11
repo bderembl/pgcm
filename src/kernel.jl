@@ -392,7 +392,7 @@ end
 function restoring!(m::ModelSetup, bc)
   # restore b to z
   zc = m.sc.*m.hc
-  bc[:] = zc + (bc-zc).*exp(-m.cc*m.dt)
+  bc[:] = zc + (bc-zc).*exp.(-m.cc*m.dt)
 end
 
 function timestep!(m::ModelSetup, s::ModelState)

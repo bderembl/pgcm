@@ -11,8 +11,8 @@ r = .1
 
 # depth and its derivatives
 d = .1
-g(x) = 1-exp(-x.^2./(2*d^2))
-gp(x) = x/d^2.*exp(-x.^2./(2*d^2))
+g(x) = 1-exp.(-x.^2./(2*d^2))
+gp(x) = x/d^2.*exp.(-x.^2./(2*d^2))
 h(x,y) = g(x).*g(1-x).*g(1+y).*g(1-y)
 hx(x,y) = (gp(x).*g(1-x)-g(x).*gp(1-x)).*g(1+y).*g(1-y)
 hy(x,y) = g(x).*g(1-x).*(gp(1+y).*g(1-y)-g(1+y).*gp(1-y))
@@ -30,7 +30,7 @@ k(x,y,s) = 1e-2*ones(s)
 #   restoring in "Southern Ocean":
 #     c(y) = (1-tanh((y+.5)/.1))/2
 #   pick restoring constant 100x the average diffusivity
-c(y) = (1-tanh((y+.5)/.1))/2
+c(y) = (1-tanh.((y+.5)/.1))/2
 
 # simulation length
 T = 200.
