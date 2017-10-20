@@ -1,7 +1,7 @@
 include("kernel.jl")
 
 # experiment name (determines folder in runs/)
-name = "test"
+name = "test2"
 
 # aspect ratio (alpha)
 a = .2
@@ -30,10 +30,17 @@ k(x,y,s) = 1e-2*ones(s)
 #   restoring in "Southern Ocean":
 #     c(y) = (1-tanh((y+.5)/.1))/2
 #   pick restoring constant 100x the average diffusivity
-c(y) = (1-tanh.((y+.5)/.1))/2
+c(y) = zeros(y)
+
+# surface restoring pattern
+#sfp(y) = cos.(pi*y)
+sfp(y) = zeros(y)
+
+# surface restoring constant
+itau_s = 100.
 
 # simulation length
-T = 200.
+T = 2.5e-3.
 
 # number of grid points
 nx = 100
@@ -44,7 +51,7 @@ ns = 20
 dt = 2.5e-5
 
 # set up model
-m = ModelSetup(a, r, T, h, k, c, nx, ny, ns, dt)
+m = ModelSetup(a, r, itau_s, T, h, k, c, sfp, nx, ny, ns, dt)
 
 # initialize model state
 s = ModelState(m)

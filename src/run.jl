@@ -17,7 +17,7 @@ while s.i < 2*m.i1 #!!!
   # time step
   timestep!(m, s)
   # save every 1000 time steps
-  if s.i%1000 == 0
+  if s.i%10 == 0
     save(s, path)
     println("saved")
   end

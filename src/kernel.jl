@@ -16,6 +16,9 @@ immutable ModelSetup
   # friction
   r::Float64
 
+  # surface forcing
+  itau_s::Float64
+
   # number of grid points
   nx::Int
   ny::Int
@@ -31,6 +34,9 @@ immutable ModelSetup
   dx::Float64
   dy::Float64
   ds::Float64
+
+  # surface forcing pattern
+  qsf::Array{Float64,2}
 
   # coordinates at cell centers
   xc::Array{Float64,3}
@@ -79,7 +85,7 @@ immutable ModelSetup
   # barotropic inversion matrix
   B::Base.SparseArrays.UMFPACK.UmfpackLU{Float64,Int64}
 
-  function ModelSetup(a, r, T, h, k, c, nx, ny, ns, dt)
+  function ModelSetup(a, r, itau_s, T, h, k, c, sfp, nx, ny, ns, dt)
 
     # Constructs model with analytic functions giving depth h(x,y), diffusivity
     # k(x,y,s), and restoring c(y). All fields needed for the calculation are
@@ -113,6 +119,9 @@ immutable ModelSetup
     
     # restoring at cell centers
     cc = c(yc)
+
+    # surface restoring
+    qsf = sfp(yc[1,:,:])
     
     # depth and its partial derivatives at cell centers
     hc = h(xc,yc)
@@ -135,12 +144,12 @@ immutable ModelSetup
     hyn = hy(xf,yf)
 
     # call full constructor to calculate inversion matrices
-    new(a, r, nx, ny, ns, dt, i1, dx, dy, ds, xc, yc, sc, xf, yf, sf, kfx, kfy,
+    new(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf, sf, kfx, kfy,
         kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn,
         hyn)
   end
 
-  function ModelSetup(a, r, nx, ny, ns, dt, i1, dx, dy, ds, xc, yc, sc, xf, yf,
+  function ModelSetup(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf,
       sf, kfx, kfy, kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy,
       hyfy, hn, hxn, hyn) 
 
@@ -215,7 +224,7 @@ immutable ModelSetup
     B = factorize(B)
 
     # Construct object.
-    new(a, r, nx, ny, ns, dt, i1, dx, dy, ds, xc, yc, sc, xf, yf, sf, kfx, kfy,
+    new(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf, sf, kfx, kfy,
         kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn,
 	hyn, A, B)
   end
@@ -231,13 +240,22 @@ type ModelState
   # buoyancy
   bc::Array{Float64,3}
 
+  # time derivative 1 (AB scheme)
+  dbdt1::Array{Float64,3}
+
+  # time derivative 2 (AB scheme)
+  dbdt2::Array{Float64,3}
+
+  # time derivative 3 (AB scheme)
+  dbdt3::Array{Float64,3}
+
   # time step number
   i::Int
 
 end
 
 # initialize with b = z
-ModelState(m) = ModelState(m.sc.*m.hc, 0)
+ModelState(m) = ModelState(m.sc.*m.hc, zeros(ns,ny,nx), zeros(ns,ny,nx), zeros(ns,ny,nx), 0)
 
 # derivatives at cell faces of field a given at cell centers
 dxcf(m, a) = (a[:,:,2:m.nx]-a[:,:,1:m.nx-1])/m.dx
@@ -304,27 +322,30 @@ ixcf(m::ModelSetup, a) = (a[:,:,1:m.nx-1]+a[:,:,2:m.nx])/2
 iycf(m::ModelSetup, a) = (a[:,1:m.ny-1,:]+a[:,2:m.ny,:])/2
 iscf(m::ModelSetup, a) = (a[1:m.ns-1,:,:]+a[2:m.ns,:,:])/2
 
-function flux_div_step!(m::ModelSetup, bc, hFx, hFy, hFs)
+function flux_div_step!(m::ModelSetup, s::ModelState, hFx, hFy, hFs)
   # flux divergence step
-  bc[:,:,1:m.nx-1] -= m.dt*hFx./(m.hc[:,:,1:m.nx-1]*m.dx)
-  bc[:,:,2:m.nx] += m.dt*hFx./(m.hc[:,:,2:m.nx]*m.dx)
-  bc[:,1:m.ny-1,:] -= m.dt*hFy./(m.hc[:,1:m.ny-1,:]*m.dy)
-  bc[:,2:m.ny,:] += m.dt*hFy./(m.hc[:,2:m.ny,:]*m.dy)
-  bc[1:m.ns-1,:,:] -= m.dt*hFs./(m.hc*m.ds)
-  bc[2:m.ns,:,:] += m.dt*hFs./(m.hc*m.ds)
+  s.dbdt1[:,:,1:m.nx-1] -= hFx./(m.hc[:,:,1:m.nx-1]*m.dx)
+  s.dbdt1[:,:,2:m.nx]   += hFx./(m.hc[:,:,2:m.nx]*m.dx)
+  s.dbdt1[:,1:m.ny-1,:] -= hFy./(m.hc[:,1:m.ny-1,:]*m.dy)
+  s.dbdt1[:,2:m.ny,:]   += hFy./(m.hc[:,2:m.ny,:]*m.dy)
+  s.dbdt1[1:m.ns-1,:,:] -= hFs./(m.hc*m.ds)
+  s.dbdt1[2:m.ns,:,:]   += hFs./(m.hc*m.ds)
 end
 
-function diffusion!(m::ModelSetup, bc)
+function hdiffusion!(m::ModelSetup, s::ModelState)
   # explicit interior fluxes (including cross terms in sigma)
-  hFx = -m.a^2*m.kfx.*(m.hfx.*dxcf(m,bc)-m.sc.*m.hxfx.*dscc(m,ixcf(m,bc),0))
-  hFy = -m.a^2*m.kfy.*(m.hfy.*dycf(m,bc)-m.sc.*m.hyfy.*dscc(m,iycf(m,bc),0))
-  hFs = m.a^2.*m.kfs.*m.sf.*(m.hxc.*dxcc(m,iscf(m,bc))
-      +m.hyc.*dycc(m,iscf(m,bc)))
-  flux_div_step!(m::ModelSetup, bc, hFx, hFy, hFs)
+  hFx = -m.a^2*m.kfx.*(m.hfx.*dxcf(m,s.bc)-m.sc.*m.hxfx.*dscc(m,ixcf(m,s.bc),0))
+  hFy = -m.a^2*m.kfy.*(m.hfy.*dycf(m,s.bc)-m.sc.*m.hyfy.*dscc(m,iycf(m,s.bc),0))
+  hFs = m.a^2.*m.kfs.*m.sf.*(m.hxc.*dxcc(m,iscf(m,s.bc))
+      +m.hyc.*dycc(m,iscf(m,s.bc)))
+  flux_div_step!(m::ModelSetup, s::ModelState, hFx, hFy, hFs)
+end
+
+function vdiffusion!(m::ModelSetup, s::ModelState)
   # implicit sigma fluxes
   for i = 1:m.nx
     for j = 1:m.ny
-      bc[:,j,i] = m.A[j,i]\bc[:,j,i]
+      s.bc[:,j,i] = m.A[j,i]\s.bc[:,j,i]
     end
   end
 end
@@ -378,30 +399,82 @@ function velocities(m::ModelSetup, bc)
   return Ux, Uy, Us
 end
 
-function advection!(m::ModelSetup, bc)
+function advection!(m::ModelSetup, s::ModelState)
   # get velocities
-  Ux, Uy, Us = velocities(m, bc)
+  Ux, Uy, Us = velocities(m, s.bc)
   # calculate advective fluxes
-  hFx = m.hfx.*Ux.*ixcf(m,bc)
-  hFy = m.hfy.*Uy.*iycf(m,bc)
-  hFs = m.hc.*Us.*iscf(m,bc)
+  hFx = m.hfx.*Ux.*ixcf(m,s.bc)
+  hFy = m.hfy.*Uy.*iycf(m,s.bc)
+  hFs = m.hc.*Us.*iscf(m,s.bc)
   # time step with flux divergence
-  flux_div_step!(m, bc, hFx, hFy, hFs)
+  flux_div_step!(m, s, hFx, hFy, hFs)
 end
 
-function restoring!(m::ModelSetup, bc)
+function restoring!(m::ModelSetup, s::ModelState)
   # restore b to z
   zc = m.sc.*m.hc
-  bc[:] = zc + (bc-zc).*exp.(-m.cc*m.dt)
+  s.dbdt1 += m.cc.*(zc-s.bc)
+#  s.bc[:] = zc + (s.bc-zc).*exp.(-m.cc*m.dt)
+
+  # surface restoring
+#  s.dbdt1[m.ns,:,:] += m.itau_s.*(m.qsf .- s.bc[m.ns,:,:])
+
+#  bc[:] = zc + (bc-zc).*exp.(-m.cc*m.dt)
+end
+
+function convect!(m::ModelSetup, bc)
+  # restore unstable stratification to neutral profile
+
+  # upper layer instability criterion
+  conv_sign = bc[m.ns,:,:] - bc[m.ns-1,:,:]
+
+  for i = 1:m.nx
+    for j = 1:m.ny
+      k = m.ns
+      while conv_sign[j,i] < 0 && k > 2
+        # layer equaly spaced: standard averaging
+        bc[k,j,i]   = 0.5*(bc[k,j,i] + bc[k-1,j,i])
+        bc[k-1,j,i] = bc[k,j,i]
+        conv_sign[j,i] = bc[k-1,j,i] - bc[k-2,j,i]
+        k = k - 1
+      end
+      # lower layer case
+      if conv_sign[j,i] < 0 & k == 2
+        bc[k,j,i]   = 0.5*(bc[k,j,i] + bc[k-1,j,i])
+        bc[k-1,j,i] = bc[k,j,i]
+      end
+    end
+  end
+
+end
+
+function time_scheme!(m::ModelSetup, s::ModelState)
+  # Adam Bashforth order 3
+  s.bc += m.dt/12.0*(23.0*s.dbdt1 - 16.0*s.dbdt2 + 5.0*s.dbdt3)
+  # Adam Bashforth order 2
+#  s.bc += m.dt/2.*(3.*s.dbdt1 - 2.*s.dbdt2 )
+  # Euler
+#  s.bc += m.dt*s.dbdt1 
+
+  s.dbdt3 = 1.0*s.dbdt2
+  s.dbdt2 = 1.0*s.dbdt1
+  s.dbdt1 = 0.0*s.dbdt1
 end
 
 function timestep!(m::ModelSetup, s::ModelState)
   # diffusion step
-  diffusion!(m, s.bc)
+  hdiffusion!(m, s)
   # advection step
-  advection!(m, s.bc)
+  advection!(m, s)
   # restoring step
-  restoring!(m, s.bc)
+  restoring!(m, s)
+  # Adam Bashforth time step
+  time_scheme!(m, s)
+  # convective adjustment
+  convect!(m, s.bc)
+  # implicit vertical diffusion
+  vdiffusion!(m, s)
+
   # increase time step number
   s.i += 1
   # print diagnostics
@@ -413,6 +486,7 @@ function save(m::ModelSetup, path)
   file = h5open(@sprintf("%s/param.h5", path), "w")
   write(file, "a", m.a)
   write(file, "r", m.r)
+  write(file, "itau_s", m.itau_s)
   write(file, "nx", m.nx)
   write(file, "ny", m.ny)
   write(file, "ns", m.ns)
@@ -421,6 +495,7 @@ function save(m::ModelSetup, path)
   write(file, "dx", m.dx)
   write(file, "dy", m.dy)
   write(file, "ds", m.ds)
+  write(file, "qsf", m.qsf)
   write(file, "xc", m.xc)
   write(file, "yc", m.yc)
   write(file, "sc", m.sc)
@@ -452,6 +527,7 @@ function load(path)
   file = h5open(@sprintf("%s/param.h5", path), "r")
   a = read(file, "a")
   r = read(file, "r")
+  itau_s = read(file, "itau_s")
   nx = read(file, "nx")
   ny = read(file, "ny")
   ns = read(file, "ns")
@@ -460,6 +536,7 @@ function load(path)
   dx = read(file, "dx")
   dy = read(file, "dy")
   ds = read(file, "ds")
+  qsf = read(file, "qsf")
   xc = read(file, "xc")
   yc = read(file, "yc")
   sc = read(file, "sc")
@@ -484,7 +561,7 @@ function load(path)
   hxn = read(file, "hxn")
   hyn = read(file, "hyn")
   close(file)
-  return ModelSetup(a, r, nx, ny, ns, dt, i1, dx, dy, ds, xc, yc, sc, xf, yf,
+  return ModelSetup(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf,
       sf, kfx, kfy, kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy,
       hyfy, hn, hxn, hyn) 
 end
@@ -493,6 +570,9 @@ function save(s::ModelState, path)
   # save model state
   file = h5open(@sprintf("%s/%010d.h5", path, s.i), "w")
   write(file, "bc", s.bc)
+  write(file, "dbdt1", s.dbdt1)
+  write(file, "dbdt2", s.dbdt2)
+  write(file, "dbdt3", s.dbdt3)
   close(file)
 end
 
@@ -500,6 +580,9 @@ function load(path, i)
   # load model state
   file = h5open(@sprintf("%s/%010d.h5", path, i), "r")
   bc = read(file, "bc")
+  dbdt1 = read(file, "dbdt1")
+  dbdt2 = read(file, "dbdt2")
+  dbdt3 = read(file, "dbdt3")
   close(file)
-  return ModelState(bc, i)
+  return ModelState(bc, dbdt1, dbdt2, dbdt3, i)
 end
