@@ -7,7 +7,7 @@ name = "test2"
 a = .2
 
 # friction coefficient (rho)
-r = .1
+r = 1.0
 
 # depth and its derivatives
 d = .1
@@ -33,14 +33,14 @@ k(x,y,s) = 1e-2*ones(s)
 c(y) = zeros(y)
 
 # surface restoring pattern
-#sfp(y) = cos.(pi*y)
-sfp(y) = zeros(y)
+sfp(y) = cos.(pi*y)
+#sfp(y) = zeros(y)
 
 # surface restoring constant
 itau_s = 100.
 
 # simulation length
-T = 2.5e-3.
+T = 2.5
 
 # number of grid points
 nx = 100

@@ -417,7 +417,7 @@ function restoring!(m::ModelSetup, s::ModelState)
 #  s.bc[:] = zc + (s.bc-zc).*exp.(-m.cc*m.dt)
 
   # surface restoring
-#  s.dbdt1[m.ns,:,:] += m.itau_s.*(m.qsf .- s.bc[m.ns,:,:])
+  s.dbdt1[m.ns,:,:] += m.itau_s.*(m.qsf .- s.bc[m.ns,:,:])
 
 #  bc[:] = zc + (bc-zc).*exp.(-m.cc*m.dt)
 end
