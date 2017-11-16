@@ -16,8 +16,11 @@ immutable ModelSetup
   # friction
   r::Float64
 
-  # surface forcing
-  itau_s::Float64
+  # domain boundaries
+  x0::Float64
+  x1::Float64
+  y0::Float64
+  y1::Float64
 
   # number of grid points
   nx::Int
@@ -36,7 +39,7 @@ immutable ModelSetup
   ds::Float64
 
   # surface forcing pattern
-  qsf::Array{Float64,2}
+  b0c::Array{Float64,3}
 
   # coordinates at cell centers
   xc::Array{Float64,3}
@@ -85,7 +88,7 @@ immutable ModelSetup
   # barotropic inversion matrix
   B::Base.SparseArrays.UMFPACK.UmfpackLU{Float64,Int64}
 
-  function ModelSetup(a, r, itau_s, T, h, k, c, sfp, nx, ny, ns, dt)
+  function ModelSetup(a, r, x0, x1, y0, y1, T, h, k, c, b0, nx, ny, ns, dt)
 
     # Constructs model with analytic functions giving depth h(x,y), diffusivity
     # k(x,y,s), and restoring c(y). All fields needed for the calculation are
@@ -95,20 +98,20 @@ immutable ModelSetup
     i1 = convert(Int, round(T/dt))
     
     # grid spacing (assuming domain 0<x<1, -1<y<1)
-    dx = 1/nx
-    dy = 2/ny
+    dx = (x1-x0)/nx
+    dy = (y1-y0)/ny
     ds = 1/ns
     
     # grid at cell centers
-    xc = reshape(collect(dx/2:dx:1-dx/2), (1,1,nx))
-    yc = reshape(collect(-1+dy/2:dy:1-dy/2), (1,ny,1))
+    xc = reshape(collect(x0+dx/2:dx:x1-dx/2), (1,1,nx))
+    yc = reshape(collect(y0+dy/2:dy:y1-dy/2), (1,ny,1))
     sc = reshape(collect(-1+ds/2:ds:-ds/2), (ns,1,1))
     
     # grid at cell faces
-    xf = reshape(collect(dx:dx:1-dx), (1,1,nx-1))
-    yf = reshape(collect(-1+dy:dy:1-dy), (1,ny-1,1))
+    xf = reshape(collect(x0+dx:dx:x1-dx), (1,1,nx-1))
+    yf = reshape(collect(y0+dy:dy:y1-dy), (1,ny-1,1))
     sf = reshape(collect(-1+ds:ds:-ds), (ns-1,1,1))
-    
+
     # diffusivity at cell faces
     kfx = k(xf,yc,sc)
     kfy = k(xc,yf,sc)
@@ -120,8 +123,8 @@ immutable ModelSetup
     # restoring at cell centers
     cc = c(yc)
 
-    # surface restoring
-    qsf = sfp(yc[1,:,:])
+    # surface BC
+    b0c = b0(xc,yc)
     
     # depth and its partial derivatives at cell centers
     hc = h(xc,yc)
@@ -144,14 +147,15 @@ immutable ModelSetup
     hyn = hy(xf,yf)
 
     # call full constructor to calculate inversion matrices
-    new(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf, sf, kfx, kfy,
-        kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn,
-        hyn)
+    new(a, r, x0, x1, y0, y1, nx, ny, ns, dt, i1, dx, dy, ds,
+        b0c, xc, yc, sc, xf, yf, sf, kfx, kfy, kfs, k0c, cc, hc, hxc,
+        hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn, hyn)
   end
 
-  function ModelSetup(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf,
-      sf, kfx, kfy, kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy,
-      hyfy, hn, hxn, hyn) 
+  function ModelSetup(a, r, x0, x1, y0, y1, nx, ny, ns, dt,
+      i1, dx, dy, ds, b0c, xc, yc, sc, xf, yf, sf, kfx, kfy, kfs, k0c,
+      cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn,
+      hyn)
 
     # constructor that builds the inversion matrices
 
@@ -224,9 +228,9 @@ immutable ModelSetup
     B = factorize(B)
 
     # Construct object.
-    new(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf, sf, kfx, kfy,
-        kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn,
-	hyn, A, B)
+    new(a, r, x0, x1, y0, y1, nx, ny, ns, dt, i1, dx, dy, ds,
+        b0c, xc, yc, sc, xf, yf, sf, kfx, kfy, kfs, k0c, cc, hc, hxc,
+        hyc, hfx, hxfx, hyfx, hfy, hxfy, hyfy, hn, hxn, hyn, A, B)
   end
 
 end
@@ -345,6 +349,8 @@ function vdiffusion!(m::ModelSetup, s::ModelState)
   # implicit sigma fluxes
   for i = 1:m.nx
     for j = 1:m.ny
+      # surface BC 
+      s.bc[m.ns,j,i] += m.dt*2*m.k0c[1,j,i]/m.hc[1,j,i]^2/m.ds^2*m.b0c[1,j,1]
       s.bc[:,j,i] = m.A[j,i]\s.bc[:,j,i]
     end
   end
@@ -413,13 +419,8 @@ end
 function restoring!(m::ModelSetup, s::ModelState)
   # restore b to z
   zc = m.sc.*m.hc
-  s.dbdt1 += m.cc.*(zc-s.bc)
-#  s.bc[:] = zc + (s.bc-zc).*exp.(-m.cc*m.dt)
-
-  # surface restoring
-  s.dbdt1[m.ns,:,:] += m.itau_s.*(m.qsf .- s.bc[m.ns,:,:])
-
-#  bc[:] = zc + (bc-zc).*exp.(-m.cc*m.dt)
+  s.bc[:] = zc + (s.bc-zc).*exp.(-m.cc*m.dt)
+#  s.dbdt1 += m.cc.*(zc-s.bc)
 end
 
 function convect!(m::ModelSetup, bc)
@@ -450,11 +451,11 @@ end
 
 function time_scheme!(m::ModelSetup, s::ModelState)
   # Adam Bashforth order 3
-  s.bc += m.dt/12.0*(23.0*s.dbdt1 - 16.0*s.dbdt2 + 5.0*s.dbdt3)
+#  s.bc += m.dt/12.0*(23.0*s.dbdt1 - 16.0*s.dbdt2 + 5.0*s.dbdt3)
   # Adam Bashforth order 2
 #  s.bc += m.dt/2.*(3.*s.dbdt1 - 2.*s.dbdt2 )
   # Euler
-#  s.bc += m.dt*s.dbdt1 
+  s.bc += m.dt*s.dbdt1 
 
   s.dbdt3 = 1.0*s.dbdt2
   s.dbdt2 = 1.0*s.dbdt1
@@ -486,7 +487,10 @@ function save(m::ModelSetup, path)
   file = h5open(@sprintf("%s/param.h5", path), "w")
   write(file, "a", m.a)
   write(file, "r", m.r)
-  write(file, "itau_s", m.itau_s)
+  write(file, "x0", m.x0)
+  write(file, "x1", m.x1)
+  write(file, "y0", m.y0)
+  write(file, "y1", m.y1)
   write(file, "nx", m.nx)
   write(file, "ny", m.ny)
   write(file, "ns", m.ns)
@@ -495,7 +499,7 @@ function save(m::ModelSetup, path)
   write(file, "dx", m.dx)
   write(file, "dy", m.dy)
   write(file, "ds", m.ds)
-  write(file, "qsf", m.qsf)
+  write(file, "b0c", m.b0c)
   write(file, "xc", m.xc)
   write(file, "yc", m.yc)
   write(file, "sc", m.sc)
@@ -527,7 +531,10 @@ function load(path)
   file = h5open(@sprintf("%s/param.h5", path), "r")
   a = read(file, "a")
   r = read(file, "r")
-  itau_s = read(file, "itau_s")
+  x0 = read(file, "x0")
+  x1 = read(file, "x1")
+  y0 = read(file, "y0")
+  y1 = read(file, "y1")
   nx = read(file, "nx")
   ny = read(file, "ny")
   ns = read(file, "ns")
@@ -536,7 +543,7 @@ function load(path)
   dx = read(file, "dx")
   dy = read(file, "dy")
   ds = read(file, "ds")
-  qsf = read(file, "qsf")
+  b0c = read(file, "b0c")
   xc = read(file, "xc")
   yc = read(file, "yc")
   sc = read(file, "sc")
@@ -561,7 +568,7 @@ function load(path)
   hxn = read(file, "hxn")
   hyn = read(file, "hyn")
   close(file)
-  return ModelSetup(a, r, itau_s, nx, ny, ns, dt, i1, dx, dy, ds, qsf, xc, yc, sc, xf, yf,
+  return ModelSetup(a, r, x0, x1, y0, y1, nx, ny, ns, dt, i1, dx, dy, ds, b0c, xc, yc, sc, xf, yf,
       sf, kfx, kfy, kfs, k0c, cc, hc, hxc, hyc, hfx, hxfx, hyfx, hfy, hxfy,
       hyfy, hn, hxn, hyn) 
 end
